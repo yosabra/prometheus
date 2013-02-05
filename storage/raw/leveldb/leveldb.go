@@ -192,29 +192,6 @@ func (l *LevelDBPersistence) GetAll() (pairs []raw.Pair, err error) {
 	return
 }
 
-func (l *LevelDBPersistence) ForAll(fn raw.EachFunc) (err error) {
-	snapshot := l.storage.NewSnapshot()
-	defer l.storage.ReleaseSnapshot(snapshot)
-	readOptions := levigo.NewReadOptions()
-	defer readOptions.Close()
-
-	readOptions.SetSnapshot(snapshot)
-	iterator := l.storage.NewIterator(readOptions)
-	defer iterator.Close()
-	iterator.SeekToFirst()
-
-	for iterator := iterator; iterator.Valid(); iterator.Next() {
-		fn(&raw.Pair{Left: iterator.Key(), Right: iterator.Value()})
-
-		err = iterator.GetError()
-		if err != nil {
-			return
-		}
-	}
-
-	return
-}
-
 func (i *iteratorCloser) Close() (err error) {
 	defer func() {
 		if i.storage != nil {
@@ -256,42 +233,42 @@ func (l *LevelDBPersistence) GetIterator() (i *levigo.Iterator, c io.Closer, err
 }
 
 func (l *LevelDBPersistence) ForEach(decoder storage.RecordDecoder, filter storage.RecordFilter, operator storage.RecordOperator) (scannedEntireCorpus bool, err error) {
-  iterator, closer, err := l.GetIterator()
-  if err != nil {
-    return
-  }
-  defer closer.Close()
+	iterator, closer, err := l.GetIterator()
+	if err != nil {
+		return
+	}
+	defer closer.Close()
 
-	for iterator := iterator; iterator.Valid(); iterator.Next() {
+	for iterator.SeekToFirst(); iterator.Valid(); iterator.Next() {
 		err = iterator.GetError()
 		if err != nil {
 			return
 		}
 
-    decodedKey, decodeErr := decoder.DecodeKey(iterator.Key())
-    if decodeErr != nil {
-      continue
-    }
-    decodedValue, decodeErr := decoder.DecodeValue(iterator.Value())
-    if decodeErr != nil {
-      continue
-    }
+		decodedKey, decodeErr := decoder.DecodeKey(iterator.Key())
+		if decodeErr != nil {
+			continue
+		}
+		decodedValue, decodeErr := decoder.DecodeValue(iterator.Value())
+		if decodeErr != nil {
+			continue
+		}
 
-    switch filter.Filter(decodedKey, decodedValue) {
-    case storage.STOP:
-      return
-    case storage.SKIP:
-      continue
-    case storage.ACCEPT:
-      opErr := operator.Operate(decodedKey, decodedValue)
-      if opErr != nil {
-        if opErr.Continuable {
-          continue
-        }
-        break
-      }
-    }
+		switch filter.Filter(decodedKey, decodedValue) {
+		case storage.STOP:
+			return
+		case storage.SKIP:
+			continue
+		case storage.ACCEPT:
+			opErr := operator.Operate(decodedKey, decodedValue)
+			if opErr != nil {
+				if opErr.Continuable {
+					continue
+				}
+				break
+			}
+		}
 	}
-  scannedEntireCorpus = true
-  return
+	scannedEntireCorpus = true
+	return
 }

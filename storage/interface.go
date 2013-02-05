@@ -17,8 +17,8 @@ package storage
 // around it makes the assumption that the underlying implementation is
 // concurrency safe.
 type RecordDecoder interface {
-  DecodeKey(in interface{}) (out interface{}, err error)
-  DecodeValue(in interface{}) (out interface{}, err error)
+	DecodeKey(in interface{}) (out interface{}, err error)
+	DecodeValue(in interface{}) (out interface{}, err error)
 }
 
 // FilterResult describes the record matching and scanning behavior for the
@@ -26,19 +26,19 @@ type RecordDecoder interface {
 type FilterResult int
 
 const (
-  // Stop scanning the database.
-  STOP FilterResult = iota
-  // Skip this record but continue scanning.
-  SKIP
-  // Accept this record for the Operator.
-  ACCEPT
+	// Stop scanning the database.
+	STOP FilterResult = iota
+	// Skip this record but continue scanning.
+	SKIP
+	// Accept this record for the Operator.
+	ACCEPT
 )
 
 type OperatorErrorType int
 
 type OperatorError struct {
-  error
-  Continuable bool
+	error
+	Continuable bool
 }
 
 // Filter is responsible for controlling the behavior of the database scan
@@ -47,8 +47,8 @@ type OperatorError struct {
 // The protocol around it makes the assumption that the underlying
 // implementation is concurrency safe.
 type RecordFilter interface {
-  // Filter receives the key and value as decoded from the RecordDecoder type.
-  Filter(key, value interface{}) (filterResult FilterResult)
+	// Filter receives the key and value as decoded from the RecordDecoder type.
+	Filter(key, value interface{}) (filterResult FilterResult)
 }
 
 // RecordOperator is responsible for taking action upon each entity that is
@@ -57,7 +57,7 @@ type RecordFilter interface {
 // The protocol around it makes the assumption that the underlying
 // implementation is concurrency safe.
 type RecordOperator interface {
-  // Take action on a given record. If the action returns an error, the entire
-  // scan process stops.
-  Operate(key, value interface{}) (err *OperatorError)
+	// Take action on a given record. If the action returns an error, the entire
+	// scan process stops.
+	Operate(key, value interface{}) (err *OperatorError)
 }

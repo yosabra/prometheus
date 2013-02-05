@@ -2,8 +2,8 @@ package api
 
 import (
 	"code.google.com/p/gorest"
-	"github.com/prometheus/prometheus/utility"
 	"github.com/prometheus/prometheus/storage/metric"
+	"github.com/prometheus/prometheus/utility"
 )
 
 type MetricsService struct {
@@ -14,7 +14,7 @@ type MetricsService struct {
 	metrics    gorest.EndPoint `method:"GET" path:"/metrics" output:"string"`
 
 	persistence metric.MetricPersistence
-	time       utility.Time
+	time        utility.Time
 }
 
 func NewMetricsService(p metric.MetricPersistence) *MetricsService {
