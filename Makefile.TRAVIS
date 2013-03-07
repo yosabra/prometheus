@@ -41,7 +41,7 @@ preparation-stamp: build-dependencies
 
 build-dependencies: build-dependencies-stamp
 
-build-dependencies-stamp: bison cc mercurial protoc goprotobuf gorest go instrumentation leveldb levigo
+build-dependencies-stamp: bison cc mercurial protoc goprotobuf gorest goskiplist go instrumentation leveldb levigo
 	touch $@
 
 overlay: overlay-stamp
@@ -113,6 +113,12 @@ instrumentation-stamp: go source
 	$(GO_GET) github.com/prometheus/client_golang
 	touch $@
 
+goskiplist: goskiplist-stamp
+
+goskiplist-stamp: go source
+	$(GO_GET) github.com/ryszard/goskiplist/skiplist
+	touch $@
+
 leveldb: leveldb-stamp
 
 leveldb-stamp: cc rsync leveldb-$(LEVELDB_VERSION).tar.gz snappy overlay
@@ -177,4 +183,4 @@ clean:
 	-rm snappy-$(SNAPPY_VERSION).tar.gz
 
 
-.PHONY: all bison build-dependencies cc clean go goprotobuf gorest instrumentation leveldb levigo mercurial overlay preparation protoc rsync snappy source test wget
+.PHONY: all bison build-dependencies cc clean go goprotobuf gorest goskiplist instrumentation leveldb levigo mercurial overlay preparation protoc rsync snappy source test wget
