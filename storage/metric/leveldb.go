@@ -552,7 +552,7 @@ func extractSampleKey(i iterator) (k *dto.SampleKey, err error) {
 	return
 }
 
-func extractSampleValue(i iterator) (v *dto.SampleValueSeries, err error) {
+func extractSampleValues(i iterator) (v *dto.SampleValueSeries, err error) {
 	if i == nil {
 		panic("nil iterator")
 	}
@@ -945,7 +945,7 @@ func (l *LevelDBMetricPersistence) GetValueAtTime(m model.Metric, t time.Time, s
 		return
 	}
 
-	firstValue, err = extractSampleValue(iterator)
+	firstValue, err = extractSampleValues(iterator)
 	if err != nil {
 		return
 	}
@@ -1001,7 +1001,7 @@ func (l *LevelDBMetricPersistence) GetValueAtTime(m model.Metric, t time.Time, s
 
 	var secondValue *dto.SampleValueSeries
 
-	secondValue, err = extractSampleValue(iterator)
+	secondValue, err = extractSampleValues(iterator)
 	if err != nil {
 		return
 	}
@@ -1065,7 +1065,7 @@ func (l *LevelDBMetricPersistence) GetRangeValues(m model.Metric, i model.Interv
 			break
 		}
 
-		retrievedValue, err := extractSampleValue(iterator)
+		retrievedValue, err := extractSampleValues(iterator)
 		if err != nil {
 			return nil, err
 		}
