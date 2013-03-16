@@ -30,6 +30,12 @@ type op interface {
 	// Get current operation time or nil if no subsequent work associated with
 	// this operator remains.
 	CurrentTime() *time.Time
+	// GreedierThan indicates whether this present operation should take
+	// precedence over the other operation due to greediness.
+	//
+	// A critical assumption is that this operator and the other occur at the
+	// same time: this.StartsAt().Equal(op.StartsAt()).
+	GreedierThan(op) bool
 }
 
 // Provides a sortable collection of operations.
@@ -39,8 +45,14 @@ func (o ops) Len() int {
 	return len(o)
 }
 
-func (o ops) Less(i, j int) bool {
-	return o[i].StartsAt().Before(o[j].StartsAt())
+// startsAtSort implements the sorting protocol and allows operator to be sorted
+// in chronological order by when they start.
+type startsAtSort struct {
+	ops
+}
+
+func (s startsAtSort) Less(i, j int) bool {
+	return s.ops[i].StartsAt().Before(s.ops[j].StartsAt())
 }
 
 func (o ops) Swap(i, j int) {
@@ -70,6 +82,24 @@ func (g *getValuesAtTimeOp) ExtractSamples(in []model.SamplePair) (out []model.S
 	return
 }
 
+func (g getValuesAtTimeOp) GreedierThan(op op) (superior bool) {
+	switch op.(type) {
+	case *getValuesAtTimeOp:
+		superior = true
+	case durationOperator:
+		superior = false
+	default:
+		panic("unknown operation")
+	}
+
+	return
+}
+
+// extractValuesAroundTime searches for the provided time in the list of
+// available samples and emits a slice containing the data points that
+// are adjacent to it.
+//
+// An assumption of this is that the provided samples are already sorted!
 func extractValuesAroundTime(t time.Time, in []model.SamplePair) (out []model.SamplePair) {
 	i := sort.Search(len(in), func(i int) bool {
 		return !in[i].Timestamp.Before(t)
@@ -146,6 +176,19 @@ func (g getValuesAtIntervalOp) CurrentTime() (currentTime *time.Time) {
 	return &g.from
 }
 
+func (g getValuesAtIntervalOp) GreedierThan(op op) (superior bool) {
+	switch o := op.(type) {
+	case *getValuesAtTimeOp:
+		superior = true
+	case durationOperator:
+		superior = g.Through().After(o.Through())
+	default:
+		panic("unknown operation")
+	}
+
+	return
+}
+
 type getValuesAlongRangeOp struct {
 	from    time.Time
 	through time.Time
@@ -196,6 +239,19 @@ func (g getValuesAlongRangeOp) CurrentTime() (currentTime *time.Time) {
 	return &g.from
 }
 
+func (g getValuesAlongRangeOp) GreedierThan(op op) (superior bool) {
+	switch o := op.(type) {
+	case *getValuesAtTimeOp:
+		superior = true
+	case durationOperator:
+		superior = g.Through().After(o.Through())
+	default:
+		panic("unknown operation")
+	}
+
+	return
+}
+
 // Provides a collection of getMetricRangeOperation.
 type getMetricRangeOperations []*getValuesAlongRangeOp
 
@@ -226,19 +282,14 @@ type durationOperator interface {
 	Through() time.Time
 }
 
-// Sorts durationOperator by the operation's duration in ascending order.
-type durationOperators []durationOperator
-
-func (o durationOperators) Len() int {
-	return len(o)
+// greedinessSort sorts the operations in descending order by level of
+// greediness.
+type greedinessSort struct {
+	ops
 }
 
-func (o durationOperators) Less(i, j int) bool {
-	return o[i].Through().Before(o[j].Through())
-}
-
-func (o durationOperators) Swap(i, j int) {
-	o[i], o[j] = o[j], o[i]
+func (g greedinessSort) Less(i, j int) bool {
+	return g.ops[i].GreedierThan(g.ops[j])
 }
 
 // Contains getValuesAtIntervalOp operations.
@@ -277,11 +328,13 @@ func (s frequencySorter) Less(i, j int) bool {
 	return l.interval < r.interval
 }
 
-// Selects and returns all operations that are getValuesAtIntervalOps operations.
-func collectIntervals(ops ops) (intervals map[time.Duration]getValuesAtIntervalOps) {
-	intervals = make(map[time.Duration]getValuesAtIntervalOps)
+// Selects and returns all operations that are getValuesAtIntervalOp operations
+// in a map whereby the operation interval is the key and the value are the
+// operations sorted by respective level of greediness.
+func collectIntervals(o ops) (intervals map[time.Duration]ops) {
+	intervals = make(map[time.Duration]ops)
 
-	for _, operation := range ops {
+	for _, operation := range o {
 		switch t := operation.(type) {
 		case *getValuesAtIntervalOp:
 			operations, _ := intervals[t.interval]
@@ -291,23 +344,17 @@ func collectIntervals(ops ops) (intervals map[time.Duration]getValuesAtIntervalO
 		}
 	}
 
-	for _, operations := range intervals {
-		sort.Sort(intervalDurationSorter{operations})
-	}
-
 	return
 }
 
 // Selects and returns all operations that are getValuesAlongRangeOp operations.
-func collectRanges(ops ops) (ranges getMetricRangeOperations) {
+func collectRanges(ops ops) (ranges ops) {
 	for _, operation := range ops {
 		switch t := operation.(type) {
 		case *getValuesAlongRangeOp:
 			ranges = append(ranges, t)
 		}
 	}
-
-	sort.Sort(rangeDurationSorter{ranges})
 
 	return
 }
@@ -346,7 +393,7 @@ func optimizeForward(pending ops) (out ops) {
 			// If the type is not a range request, we can't do anything.
 			switch next := peekOperation.(type) {
 			case *getValuesAlongRangeOp:
-				if !next.Through().After(t.Through()) {
+				if !next.GreedierThan(t) {
 					var (
 						before = getValuesAtIntervalOp(*t)
 						after  = getValuesAtIntervalOp(*t)
@@ -370,7 +417,7 @@ func optimizeForward(pending ops) (out ops) {
 					}
 
 					pending = append(ops{&before, &after}, pending...)
-					sort.Sort(pending)
+					sort.Sort(startsAtSort{pending})
 
 					return optimizeForward(pending)
 				}
@@ -392,7 +439,7 @@ func optimizeForward(pending ops) (out ops) {
 				// Range queries should be concatenated if they overlap.
 				pending = pending[1:len(pending)]
 
-				if next.Through().After(t.Through()) {
+				if next.GreedierThan(t) {
 					t.through = next.through
 
 					var (
@@ -407,7 +454,7 @@ func optimizeForward(pending ops) (out ops) {
 			case *getValuesAtIntervalOp:
 				pending = pending[1:len(pending)]
 
-				if next.through.After(t.Through()) {
+				if next.GreedierThan(t) {
 					var (
 						t = next.from
 					)
@@ -432,13 +479,15 @@ func optimizeForward(pending ops) (out ops) {
 	}
 
 	// Strictly needed?
-	sort.Sort(pending)
+	sort.Sort(startsAtSort{pending})
 
 	tail := optimizeForward(pending)
 
 	return append(ops{firstOperation}, tail...)
 }
 
+// selectQueriesForTime chooses all subsequent operations from the slice that
+// have the same start time as the provided time and emits them.
 func selectQueriesForTime(time time.Time, queries ops) (out ops) {
 	if len(queries) == 0 {
 		return
@@ -454,48 +503,47 @@ func selectQueriesForTime(time time.Time, queries ops) (out ops) {
 	return append(out, tail...)
 }
 
+// selectGreediestRange scans through the various getValuesAlongRangeOp
+// operations and emits the one that is the greediest.
+func selectGreediestRange(in ops) (o durationOperator) {
+	if len(in) == 0 {
+		return
+	}
+
+	sort.Sort(greedinessSort{in})
+
+	o = in[0].(*getValuesAlongRangeOp)
+
+	return
+}
+
+// selectGreediestIntervals scans through the various getValuesAtIntervalOp
+// operations and emits a map of the greediest operation keyed by its start
+// time.
+func selectGreediestIntervals(in map[time.Duration]ops) (out map[time.Duration]durationOperator) {
+	if len(in) == 0 {
+		return
+	}
+
+	out = make(map[time.Duration]durationOperator)
+
+	for i, ops := range in {
+		sort.Sort(greedinessSort{ops})
+
+		out[i] = ops[0].(*getValuesAtIntervalOp)
+	}
+
+	return
+}
+
 // Flattens queries that occur at the same time according to duration and level
 // of greed.
 func optimizeTimeGroup(group ops) (out ops) {
 	var (
-		rangeOperations    = collectRanges(group)
-		intervalOperations = collectIntervals(group)
-
-		greediestRange     durationOperator
-		greediestIntervals map[time.Duration]durationOperator
-	)
-
-	if len(rangeOperations) > 0 {
-		operations := durationOperators{}
-		for i := 0; i < len(rangeOperations); i++ {
-			operations = append(operations, rangeOperations[i])
-		}
-
-		// intervaledOperations sorts on the basis of the length of the window.
-		sort.Sort(operations)
-
-		greediestRange = operations[len(operations)-1 : len(operations)][0]
-	}
-
-	if len(intervalOperations) > 0 {
-		greediestIntervals = make(map[time.Duration]durationOperator)
-
-		for i, ops := range intervalOperations {
-			operations := durationOperators{}
-			for j := 0; j < len(ops); j++ {
-				operations = append(operations, ops[j])
-			}
-
-			// intervaledOperations sorts on the basis of the length of the window.
-			sort.Sort(operations)
-
-			greediestIntervals[i] = operations[len(operations)-1 : len(operations)][0]
-		}
-	}
-
-	var (
-		containsRange    = greediestRange != nil
-		containsInterval = len(greediestIntervals) > 0
+		greediestRange     = selectGreediestRange(collectRanges(group))
+		greediestIntervals = selectGreediestIntervals(collectIntervals(group))
+		containsRange      = greediestRange != nil
+		containsInterval   = len(greediestIntervals) > 0
 	)
 
 	if containsRange && !containsInterval {
@@ -514,7 +562,7 @@ func optimizeTimeGroup(group ops) (out ops) {
 	} else if containsRange && containsInterval {
 		out = append(out, greediestRange)
 		for _, op := range greediestIntervals {
-			if !op.Through().After(greediestRange.Through()) {
+			if !op.GreedierThan(greediestRange) {
 				continue
 			}
 
@@ -550,7 +598,7 @@ func optimizeTimeGroups(pending ops) (out ops) {
 		return
 	}
 
-	sort.Sort(pending)
+	sort.Sort(startsAtSort{pending})
 
 	nextOperation := pending[0]
 	groupedQueries := selectQueriesForTime(nextOperation.StartsAt(), pending)
