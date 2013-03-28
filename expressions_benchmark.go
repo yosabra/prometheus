@@ -20,7 +20,6 @@ import (
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/rules/ast"
 	"github.com/prometheus/prometheus/storage/metric"
-	"github.com/prometheus/prometheus/storage/metric/leveldb"
 	"log"
 	"os"
 	"time"
@@ -39,8 +38,8 @@ var (
 	valueIntervalSeconds   = flag.Int("valueIntervalSeconds", 15, "Time in seconds between generated data points.")
 
 	// Reading benchmark flags.
-	numReadIterations = flag.Int("numReadIterations", 5, "How often to run and time each expression.")
-	evalIntervalSeconds      = flag.Int("evalIntervalSeconds", 24*60*60, "Interval in seconds over which to evaluate expressions.")
+	numReadIterations   = flag.Int("numReadIterations", 5, "How often to run and time each expression.")
+	evalIntervalSeconds = flag.Int("evalIntervalSeconds", 24*60*60, "Interval in seconds over which to evaluate expressions.")
 )
 
 var expressions = []string{
@@ -71,7 +70,7 @@ var expressions = []string{
 //
 // The number of static labels is determined by -numLabels, while the number of
 // timeseries is set by -numTimeseries.
-func populatePersistence(persistence metric.MetricPersistence) {
+func populateTestStorage(storage metric.Storage) {
 	metric := model.Metric{}
 
 	for i := 0; i < *numLabels; i++ {
@@ -84,17 +83,18 @@ func populatePersistence(persistence metric.MetricPersistence) {
 	for ts := 0; ts < *numTimeseries; ts++ {
 		metric["name"] = model.LabelValue(fmt.Sprintf("metric_%d", ts))
 		for t := startTime; t.Before(endTime); t = t.Add(interval) {
-			sample := &model.Sample{
+			sample := model.Sample{
 				Metric:    metric,
 				Value:     12345.6789, // The sample value shouldn't really matter.
 				Timestamp: t,
 			}
-			persistence.AppendSample(sample)
+			storage.AppendSample(sample)
 		}
 	}
+	storage.Flush()
 }
 
-func doBenchmark(persistence metric.MetricPersistence, expression string) {
+func doBenchmark(storage metric.Storage, expression string) {
 	fmt.Printf("\n==== Expression: '%s' ====\n", expression)
 	exprNode, err := rules.LoadExprFromString(expression)
 	if err != nil {
@@ -104,13 +104,16 @@ func doBenchmark(persistence metric.MetricPersistence, expression string) {
 	startTime := time.Time{}
 	endTime := startTime.Add(time.Duration(*evalIntervalSeconds) * time.Second)
 	step := time.Duration(*valueIntervalSeconds) * time.Second
-fmt.Printf("Start time: %v\n", startTime)
-fmt.Printf("End time: %v\n", endTime)
+	fmt.Printf("Start time: %v\n", startTime)
+	fmt.Printf("End time: %v\n", endTime)
 
 	totalTime := time.Duration(0)
 	for i := 0; i < *numReadIterations; i++ {
 		evalStartTime := time.Now()
-		_ = ast.EvalVectorRange(exprNode.(ast.VectorNode), startTime, endTime, step)
+		_, err := ast.EvalVectorRange(exprNode.(ast.VectorNode), startTime, endTime, step)
+		if err != nil {
+			log.Fatalf("Error evaluating expression: %s", err)
+		}
 		iterationTime := time.Since(evalStartTime)
 		//fmt.Printf("Iteration time: %v\n", iterationTime)
 		totalTime += iterationTime
@@ -121,31 +124,32 @@ fmt.Printf("End time: %v\n", endTime)
 func main() {
 	flag.Parse()
 
-  if *evalIntervalSeconds > (*valueIntervalSeconds * *numValuesPerTimeseries) {
-		log.Fatalf("Evaluation interval (-evalIntervalSeconds) is greater than the stored range (-valueIntervalSeconds * -numValuesPerTimeseries)\n");
+	if *evalIntervalSeconds > (*valueIntervalSeconds * *numValuesPerTimeseries) {
+		log.Fatalf("Evaluation interval (-evalIntervalSeconds) is greater than the stored range (-valueIntervalSeconds * -numValuesPerTimeseries)\n")
 	}
 
 	err := os.MkdirAll(*metricsStoragePath, 0755)
 	if err != nil {
 		log.Fatalf("Error creating storage directory: %v", err)
 	}
-	persistence, err := leveldb.NewLevelDBMetricPersistence(*metricsStoragePath)
+	storage, err := metric.NewTieredStorage(5000, 5000, 100, time.Second*30, time.Second*1, time.Second*20, *metricsStoragePath)
 	if err != nil {
 		log.Fatalf("Error opening storage: %v", err)
 	}
+	go storage.Serve()
 	defer func() {
-		persistence.Close()
+		storage.Close()
 		if *deleteStorage {
 			os.RemoveAll(*metricsStoragePath)
 		}
 	}()
 
-	ast.SetPersistence(persistence, nil)
+	ast.SetStorage(storage)
 	if *populateStorage {
-		populatePersistence(persistence)
+		populateTestStorage(storage)
 	}
 
 	for _, expression := range expressions {
-		doBenchmark(persistence, expression)
+		doBenchmark(storage, expression)
 	}
 }
