@@ -71,16 +71,16 @@ var expressions = []string{
 // The number of static labels is determined by -numLabels, while the number of
 // timeseries is set by -numTimeseries.
 func populateTestStorage(storage metric.Storage) {
-	metric := model.Metric{}
-
-	for i := 0; i < *numLabels; i++ {
-		metric[model.LabelName(fmt.Sprintf("label%d", i))] = "value"
-	}
-
 	interval := time.Duration(*valueIntervalSeconds) * time.Second
 	startTime := time.Time{}
 	endTime := startTime.Add(interval * time.Duration(*numValuesPerTimeseries))
 	for ts := 0; ts < *numTimeseries; ts++ {
+		metric := model.Metric{}
+
+		for i := 0; i < *numLabels; i++ {
+			metric[model.LabelName(fmt.Sprintf("label%d", i))] = "value"
+		}
+
 		metric["name"] = model.LabelValue(fmt.Sprintf("metric_%d", ts))
 		for t := startTime; t.Before(endTime); t = t.Add(interval) {
 			sample := model.Sample{
