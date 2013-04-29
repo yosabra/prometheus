@@ -30,7 +30,7 @@ import (
 // tieredStorage both persists samples and generates materialized views for
 // queries.
 type tieredStorage struct {
-	appendToDiskQueue   chan model.Samples
+	appendToDiskQueue   model.Samples
 	appendToMemoryQueue chan model.Samples
 	diskFrontier        *diskFrontier
 	diskStorage         *LevelDBMetricPersistence
@@ -81,7 +81,7 @@ func NewTieredStorage(appendToMemoryQueueDepth, appendToDiskQueueDepth, viewQueu
 	}
 
 	storage = &tieredStorage{
-		appendToDiskQueue:   make(chan model.Samples, appendToDiskQueueDepth),
+		appendToDiskQueue:   make(model.Samples, 0, appendToDiskQueueDepth),
 		appendToMemoryQueue: make(chan model.Samples, appendToMemoryQueueDepth),
 		diskStorage:         diskStorage,
 		draining:            make(chan chan bool),
@@ -232,7 +232,6 @@ func (t tieredStorage) Close() {
 	t.diskStorage.Close()
 	t.memoryArena.Close()
 
-	close(t.appendToDiskQueue)
 	close(t.appendToMemoryQueue)
 	close(t.viewQueue)
 	log.Println("Done.")
@@ -248,7 +247,7 @@ func (t tieredStorage) flush() (err error) {
 }
 
 type memoryToDiskFlusher struct {
-	toDiskQueue    chan model.Samples
+	toDiskQueue    model.Samples
 	disk           MetricPersistence
 	olderThan      time.Time
 	valuesAccepted int
@@ -294,13 +293,12 @@ func (f memoryToDiskFlusherVisitor) Operate(key, value interface{}) (err *storag
 		f.flusher.Flush()
 	}
 
-	f.flusher.toDiskQueue <- model.Samples{
+	f.flusher.toDiskQueue = append(f.flusher.toDiskQueue,
 		model.Sample{
 			Metric:    f.stream.metric,
 			Timestamp: recordTime,
 			Value:     recordValue,
-		},
-	}
+		})
 
 	f.stream.values.Delete(skipListTime(recordTime))
 
@@ -317,15 +315,11 @@ func (f *memoryToDiskFlusher) ForStream(stream stream) (decoder storage.RecordDe
 }
 
 func (f *memoryToDiskFlusher) Flush() {
-	length := len(f.toDiskQueue)
-	samples := model.Samples{}
-	for i := 0; i < length; i++ {
-		samples = append(samples, <-f.toDiskQueue...)
-	}
-	f.disk.AppendSamples(samples)
+	f.disk.AppendSamples(f.toDiskQueue)
+	f.toDiskQueue = f.toDiskQueue[0:0]
 }
 
-func (f memoryToDiskFlusher) Close() {
+func (f *memoryToDiskFlusher) Close() {
 	f.Flush()
 }
 
