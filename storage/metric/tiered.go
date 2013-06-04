@@ -66,6 +66,9 @@ type TieredStorage struct {
 	viewQueue chan viewJob
 
 	draining chan chan bool
+
+	diskSemaphore   chan bool
+	memorySemaphore chan bool
 }
 
 // viewJob encapsulates a request to extract sample values from the datastore.
@@ -76,13 +79,13 @@ type viewJob struct {
 	err     chan error
 }
 
-func NewTieredStorage(appendToDiskQueueDepth, viewQueueDepth uint, flushMemoryInterval, memoryTTL time.Duration, root string) (storage *TieredStorage, err error) {
+func NewTieredStorage(appendToDiskQueueDepth, viewQueueDepth uint, flushMemoryInterval, memoryTTL time.Duration, root string) (*TieredStorage, error) {
 	diskStorage, err := NewLevelDBMetricPersistence(root)
 	if err != nil {
-		return
+		return nil, err
 	}
 
-	storage = &TieredStorage{
+	storage := &TieredStorage{
 		appendToDiskQueue:   make(chan model.Samples, appendToDiskQueueDepth),
 		DiskStorage:         diskStorage,
 		draining:            make(chan chan bool),
@@ -90,8 +93,18 @@ func NewTieredStorage(appendToDiskQueueDepth, viewQueueDepth uint, flushMemoryIn
 		memoryArena:         NewMemorySeriesStorage(),
 		memoryTTL:           memoryTTL,
 		viewQueue:           make(chan viewJob, viewQueueDepth),
+		diskSemaphore:       make(chan bool, 1),
+		memorySemaphore:     make(chan bool, 5),
 	}
-	return
+
+	for i := 0; i < 1; i++ {
+		storage.diskSemaphore <- true
+	}
+	for i := 0; i < 5; i++ {
+		storage.memorySemaphore <- true
+	}
+
+	return storage, nil
 }
 
 // Enqueues Samples for storage.
@@ -257,6 +270,11 @@ func (t *TieredStorage) renderView(viewJob viewJob) {
 		recordOutcome(duration, err, map[string]string{operation: renderView, result: success}, map[string]string{operation: renderView, result: failure})
 	}()
 
+	<-t.memorySemaphore
+	defer func() {
+		t.memorySemaphore <- true
+	}()
+
 	scans := viewJob.builder.ScanJobs()
 	view := newView()
 
@@ -288,6 +306,10 @@ func (t *TieredStorage) renderView(viewJob viewJob) {
 					if iterator == nil {
 						// Get a single iterator that will be used for all data extraction
 						// below.
+						<-t.diskSemaphore
+						defer func() {
+							t.diskSemaphore <- true
+						}()
 						iterator = t.DiskStorage.MetricSamples.NewIterator(true)
 						defer iterator.Close()
 					}
