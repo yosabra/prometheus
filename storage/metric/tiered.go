@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"log"
 	"sort"
-	"sync"
 	"time"
 
 	dto "github.com/prometheus/prometheus/model/generated"
@@ -67,8 +66,6 @@ type TieredStorage struct {
 	viewQueue chan viewJob
 
 	draining chan chan bool
-
-	mutex sync.Mutex
 }
 
 // viewJob encapsulates a request to extract sample values from the datastore.
