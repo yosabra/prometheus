@@ -68,7 +68,10 @@ type Curator struct {
 
 // watermarkDecoder converts (dto.Fingerprint, dto.MetricHighWatermark) doubles
 // into (model.Fingerprint, model.Watermark) doubles.
-type watermarkDecoder struct{}
+type watermarkDecoder struct {
+	fingerprints fingerprintLessor
+	watermarks   highWatermarkLessor
+}
 
 // watermarkOperator scans over the curator.samples table for metrics whose
 // high watermark has been determined to be allowable for curation.  This type
@@ -101,7 +104,7 @@ type watermarkOperator struct {
 // curated.
 // curationState is the on-disk store where the curation remarks are made for
 // how much progress has been made.
-func (c Curator) Run(ignoreYoungerThan time.Duration, instant time.Time, processor Processor, curationState, samples, watermarks *leveldb.LevelDBPersistence, status chan CurationState) (err error) {
+func (c *Curator) Run(ignoreYoungerThan time.Duration, instant time.Time, processor Processor, curationState, samples, watermarks *leveldb.LevelDBPersistence, status chan CurationState) (err error) {
 	defer func(t time.Time) {
 		duration := float64(time.Since(t) / time.Millisecond)
 
@@ -130,16 +133,17 @@ func (c Curator) Run(ignoreYoungerThan time.Duration, instant time.Time, process
 
 	diskFrontier, present, err := newDiskFrontier(iterator)
 	if err != nil {
-		return
+		return err
 	}
 	if !present {
 		// No sample database exists; no work to do!
-		return
+		return nil
 	}
 
-	decoder := watermarkDecoder{}
+	decoder := newWatermarkDecoder()
+	defer decoder.Close()
 
-	filter := watermarkFilter{
+	filter := &watermarkFilter{
 		curationState:     curationState,
 		ignoreYoungerThan: ignoreYoungerThan,
 		processor:         processor,
@@ -151,7 +155,7 @@ func (c Curator) Run(ignoreYoungerThan time.Duration, instant time.Time, process
 	// Right now, the ability to stop a curation is limited to the beginning of
 	// each fingerprint cycle.  It is impractical to cease the work once it has
 	// begun for a given series.
-	operator := watermarkOperator{
+	operator := &watermarkOperator{
 		curationState:     curationState,
 		diskFrontier:      diskFrontier,
 		processor:         processor,
@@ -163,46 +167,55 @@ func (c Curator) Run(ignoreYoungerThan time.Duration, instant time.Time, process
 
 	_, err = watermarks.ForEach(decoder, filter, operator)
 
-	return
+	return err
 }
 
 // drain instructs the curator to stop at the next convenient moment as to not
 // introduce data inconsistencies.
-func (c Curator) Drain() {
-	if len(c.Stop) == 0 {
-		c.Stop <- true
+func (c *Curator) Drain() {
+	select {
+	case c.Stop <- true:
+	default:
 	}
 }
 
-func (w watermarkDecoder) DecodeKey(in interface{}) (out interface{}, err error) {
-	key := &dto.Fingerprint{}
-	bytes := in.([]byte)
+func (w *watermarkDecoder) DecodeKey(in interface{}) (interface{}, error) {
+	key := w.fingerprints.lease()
+	defer w.fingerprints.credit(key)
 
-	err = proto.Unmarshal(bytes, key)
+	err := proto.Unmarshal(in.([]byte), key)
 	if err != nil {
-		return
+		return nil, err
 	}
 
-	out = model.NewFingerprintFromDTO(key)
-
-	return
+	return model.NewFingerprintFromDTO(key), nil
 }
 
-func (w watermarkDecoder) DecodeValue(in interface{}) (out interface{}, err error) {
-	dto := &dto.MetricHighWatermark{}
-	bytes := in.([]byte)
+func (w *watermarkDecoder) DecodeValue(in interface{}) (interface{}, error) {
+	value := w.watermarks.lease()
+	defer w.watermarks.credit(value)
 
-	err = proto.Unmarshal(bytes, dto)
+	err := proto.Unmarshal(in.([]byte), value)
 	if err != nil {
-		return
+		return nil, err
 	}
 
-	out = model.NewWatermarkFromHighWatermarkDTO(dto)
-
-	return
+	return model.NewWatermarkFromHighWatermarkDTO(value), nil
 }
 
-func (w watermarkFilter) shouldStop() bool {
+func (w *watermarkDecoder) Close() {
+	w.fingerprints.close()
+	w.watermarks.close()
+}
+
+func newWatermarkDecoder() *watermarkDecoder {
+	return &watermarkDecoder{
+		fingerprints: make(fingerprintLessor, 1024),
+		watermarks:   make(highWatermarkLessor, 1024),
+	}
+}
+
+func (w *watermarkFilter) shouldStop() bool {
 	return len(w.stop) != 0
 }
 
@@ -233,7 +246,7 @@ func getCurationRemark(states raw.Persistence, processor Processor, ignoreYounge
 	return &remark, nil
 }
 
-func (w watermarkFilter) Filter(key, value interface{}) (r storage.FilterResult) {
+func (w *watermarkFilter) Filter(key, value interface{}) (r storage.FilterResult) {
 	fingerprint := key.(*model.Fingerprint)
 
 	defer func() {
@@ -291,7 +304,7 @@ func (w watermarkFilter) Filter(key, value interface{}) (r storage.FilterResult)
 
 // curationConsistent determines whether the given metric is in a dirty state
 // and needs curation.
-func (w watermarkFilter) curationConsistent(f *model.Fingerprint, watermark model.Watermark) (consistent bool, err error) {
+func (w *watermarkFilter) curationConsistent(f *model.Fingerprint, watermark model.Watermark) (consistent bool, err error) {
 	curationRemark, err := getCurationRemark(w.curationState, w.processor, w.ignoreYoungerThan, f)
 	if err != nil {
 		return
@@ -303,7 +316,7 @@ func (w watermarkFilter) curationConsistent(f *model.Fingerprint, watermark mode
 	return
 }
 
-func (w watermarkOperator) Operate(key, _ interface{}) (oErr *storage.OperatorError) {
+func (w *watermarkOperator) Operate(key, _ interface{}) (oErr *storage.OperatorError) {
 	fingerprint := key.(*model.Fingerprint)
 
 	seriesFrontier, present, err := newSeriesFrontier(fingerprint, w.diskFrontier, w.sampleIterator)
@@ -358,7 +371,7 @@ func (w watermarkOperator) Operate(key, _ interface{}) (oErr *storage.OperatorEr
 	return
 }
 
-func (w watermarkOperator) refreshCurationRemark(f *model.Fingerprint, finished time.Time) (err error) {
+func (w *watermarkOperator) refreshCurationRemark(f *model.Fingerprint, finished time.Time) (err error) {
 	signature, err := w.processor.Signature()
 	if err != nil {
 		return
